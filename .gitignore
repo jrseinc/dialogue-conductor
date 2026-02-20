@@ -1,0 +1,14 @@
+# Python-generated files
+bm25_dataset/
+movies/
+shows/
+
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv

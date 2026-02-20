@@ -1,0 +1,15 @@
+[project]
+name = "dialogue-conductor"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=2.21.0",
+    "pinecone>=8.0.1",
+    "pinecone-text>=0.11.0",
+    "pysrt>=1.1.2",
+    "python-dotenv>=1.2.1",
+    "rich>=14.3.2",
+    "tiktoken>=0.12.0",
+]
