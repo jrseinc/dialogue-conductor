@@ -1,12 +1,21 @@
+import os
 import tiktoken
 import pysrt
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Optional
+from typing import Iterator, Optional, cast
+
+from pinecone_service import CategoryType, ChunkMetadata, VectorDatabaseService
 
 BASE_DIR = Path(__file__).resolve().parent
-SUBTITLES_DIR = (BASE_DIR / "tbbt").resolve()
+BM25_DATASET_DIR = (BASE_DIR / "bm25_dataset").resolve()
+
+MEDIA_DIRS = [
+    {"path": (BASE_DIR / "shows").resolve(), "category": "series"},
+    {"path": (BASE_DIR / "movies").resolve(), "category": "movies"},
+]
+
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
 
@@ -39,7 +48,8 @@ def get_episode_metadata(filename: str) -> Optional[EpisodeMetadata]:
             data = match.groupdict()
 
             ep_title = (
-                data.get("EpTitle", "").split("1080p")[0].split("Bluray")[0].strip()
+                data.get("EpTitle", "").split("1080p")[
+                    0].split("Bluray")[0].strip()
             )
 
             return EpisodeMetadata(
@@ -74,35 +84,61 @@ def chunker(subtitles: pysrt.SubRipFile, max_token: int = 500, overlap_line: int
         yield current_chunk
 
 
-def main():
-    for subtitle_file in SUBTITLES_DIR.glob("*.srt"):
-        metadata = get_episode_metadata(subtitle_file.name)
+def process_media_folder(media_dir: Path, category: str) -> Iterator[dict]:
+    print(f"Processing {category}: {media_dir.name} ---")
 
-        if not metadata:
-            print(f"Skipping {subtitle_file.name}: Could not parse metadata")
-            continue
+    for subtitle_file in media_dir.glob("*.srt"):
+        episode_metadata = get_episode_metadata(subtitle_file.name)
 
-        subtitles = pysrt.open(str(subtitle_file), encoding="utf-8")
+        display_title = (
+            episode_metadata.title if episode_metadata else subtitle_file.stem
+        )
+        try:
+            subtitles = pysrt.open(str(subtitle_file), encoding="utf-8")
+        except UnicodeDecodeError:
+            subtitles = pysrt.open(str(subtitle_file), encoding="latin-1")
 
         for chunk_index, chunk_lines in enumerate(chunker(subtitles)):
-            full_text = " ".join([item.text_without_tags for item in chunk_lines])
+            full_text = " ".join(
+                [item.text_without_tags for item in chunk_lines])
 
-            start_time = chunk_lines[0].start
-            end_time = chunk_lines[-1].end
-
-            payload = {
-                "id": f"{metadata.title}_S{metadata.season}E{metadata.episode}_C{chunk_index}",
-                "text": full_text,
-                "metadata": {
-                    "title": metadata.title,
-                    "season": metadata.season,
-                    "episode": metadata.episode,
-                    "start": str(start_time),
-                    "end": str(end_time),
-                },
+            metadata: ChunkMetadata = {
+                "category": cast(CategoryType, category),
+                "source_id": media_dir.name,
+                "title": display_title,
+                "start": str(chunk_lines[0].start),
+                "end": str(chunk_lines[-1].end),
             }
 
-            print(payload)
+            if category == "series" and episode_metadata:
+                metadata["season"] = episode_metadata.season
+                metadata["episode"] = episode_metadata.episode
+
+            yield {
+                "id": f"{media_dir.name}_{display_title}_C{chunk_index}",
+                "text": full_text,
+                "metadata": metadata,
+            }
+
+
+def main():
+    vector_db = VectorDatabaseService(BM25_DATASET_DIR)
+
+    for media_dir in MEDIA_DIRS:
+        root_path = media_dir["path"]
+        category = media_dir["category"]
+
+        if not root_path.exists():
+            print(
+                f"Skipping {category}: Directory {root_path} does not exists")
+            continue
+
+        for folder in root_path.iterdir():
+            if folder.is_dir():
+                media_iterator = process_media_folder(folder, category)
+
+                vector_db.process_and_upload(
+                    folder.name, media_iterator, category)
 
 
 if __name__ == "__main__":
