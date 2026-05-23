@@ -1,10 +1,11 @@
 import os
-import tiktoken
-import pysrt
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Iterator, Optional, cast
+
+import pysrt
+import tiktoken
 
 from pinecone_service import CategoryType, ChunkMetadata, VectorDatabaseService
 
@@ -48,8 +49,7 @@ def get_episode_metadata(filename: str) -> Optional[EpisodeMetadata]:
             data = match.groupdict()
 
             ep_title = (
-                data.get("EpTitle", "").split("1080p")[
-                    0].split("Bluray")[0].strip()
+                data.get("EpTitle", "").split("1080p")[0].split("Bluray")[0].strip()
             )
 
             return EpisodeMetadata(
@@ -61,27 +61,21 @@ def get_episode_metadata(filename: str) -> Optional[EpisodeMetadata]:
     return None
 
 
-def chunker(subtitles: pysrt.SubRipFile, max_token: int = 500, overlap_line: int = 3):
-    current_chunk = []
-    current_token_count = 0
+def chunker(
+    subtitles: pysrt.SubRipFile, lines_per_chunk: int = 3, overlap_line: int = 1
+):
+    subtitles_list = list(subtitles)
 
-    for item in range(len(subtitles)):
-        line_text = subtitles[item].text_without_tags.replace("\n", " ")
-        line_tokens = len(tokenizer.encode(line_text))
+    step = len(subtitles_list) - lines_per_chunk
 
-        current_chunk.append(subtitles[item])
-        current_token_count += line_tokens
+    for i in range(0, len(subtitles_list), step):
+        chunk = subtitles_list[i : i + lines_per_chunk]
 
-        if current_token_count > max_token:
-            yield current_chunk
+        if chunk:
+            yield chunk
 
-            current_chunk = current_chunk[-overlap_line:]
-            current_token_count = sum(
-                len(tokenizer.encode(s.text_without_tags)) for s in current_chunk
-            )
-
-    if current_chunk:
-        yield current_chunk
+            if i + lines_per_chunk >= len(subtitles_list):
+                break
 
 
 def process_media_folder(media_dir: Path, category: str) -> Iterator[dict]:
@@ -99,8 +93,7 @@ def process_media_folder(media_dir: Path, category: str) -> Iterator[dict]:
             subtitles = pysrt.open(str(subtitle_file), encoding="latin-1")
 
         for chunk_index, chunk_lines in enumerate(chunker(subtitles)):
-            full_text = " ".join(
-                [item.text_without_tags for item in chunk_lines])
+            full_text = " ".join([item.text_without_tags for item in chunk_lines])
 
             metadata: ChunkMetadata = {
                 "category": cast(CategoryType, category),
@@ -111,11 +104,14 @@ def process_media_folder(media_dir: Path, category: str) -> Iterator[dict]:
             }
 
             if category == "series" and episode_metadata:
+                unique_id = f"{media_dir.name}_S{episode_metadata.season:02d}E{episode_metadata.episode:02d}_C{chunk_index}"
                 metadata["season"] = episode_metadata.season
                 metadata["episode"] = episode_metadata.episode
+            else:
+                unique_id = f"{media_dir.name}_{subtitle_file.stem}_C{chunk_index}"
 
             yield {
-                "id": f"{media_dir.name}_{display_title}_C{chunk_index}",
+                "id": unique_id,
                 "text": full_text,
                 "metadata": metadata,
             }
@@ -129,16 +125,14 @@ def main():
         category = media_dir["category"]
 
         if not root_path.exists():
-            print(
-                f"Skipping {category}: Directory {root_path} does not exists")
+            print(f"Skipping {category}: Directory {root_path} does not exists")
             continue
 
         for folder in root_path.iterdir():
             if folder.is_dir():
                 media_iterator = process_media_folder(folder, category)
 
-                vector_db.process_and_upload(
-                    folder.name, media_iterator, category)
+                vector_db.process_and_upload(folder.name, media_iterator, category)
 
 
 if __name__ == "__main__":
