@@ -20,6 +20,21 @@ MEDIA_DIRS = [
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
 
+def slugify(name: str) -> str:
+    """Normalize a media folder name to a lowercase kebab-case source_id.
+
+    Enforces one convention across shows and movies regardless of how the
+    folder happens to be named: "3_idiots", "The Big Bang Theory" both become
+    "3-idiots" / "the-big-bang-theory". This is the id the detective filters
+    on, so it must be stable and consistent.
+    """
+    slug = name.strip().lower()
+    slug = re.sub(r"[\s_]+", "-", slug)       # spaces / underscores -> hyphen
+    slug = re.sub(r"[^a-z0-9-]+", "", slug)   # drop anything else
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")  # collapse + trim hyphens
+    return slug
+
+
 @dataclass
 class EpisodeMetadata:
     title: str
@@ -66,7 +81,7 @@ def chunker(
 ):
     subtitles_list = list(subtitles)
 
-    step = len(subtitles_list) - lines_per_chunk
+    step = max(1, lines_per_chunk - overlap_line)
 
     for i in range(0, len(subtitles_list), step):
         chunk = subtitles_list[i : i + lines_per_chunk]
@@ -79,14 +94,14 @@ def chunker(
 
 
 def process_media_folder(media_dir: Path, category: str) -> Iterator[dict]:
-    print(f"Processing {category}: {media_dir.name} ---")
+    source_id = slugify(media_dir.name)
+    print(f"Processing {category}: {media_dir.name} (source_id={source_id}) ---")
 
-    for subtitle_file in media_dir.glob("*.srt"):
+    for subtitle_file in sorted(media_dir.rglob("*.srt")):
         episode_metadata = get_episode_metadata(subtitle_file.name)
 
-        display_title = (
-            episode_metadata.title if episode_metadata else subtitle_file.stem
-        )
+        folder_title = media_dir.name.replace("_", " ").replace("-", " ").title()
+        display_title = episode_metadata.title if episode_metadata else folder_title
         try:
             subtitles = pysrt.open(str(subtitle_file), encoding="utf-8")
         except UnicodeDecodeError:
@@ -97,18 +112,18 @@ def process_media_folder(media_dir: Path, category: str) -> Iterator[dict]:
 
             metadata: ChunkMetadata = {
                 "category": cast(CategoryType, category),
-                "source_id": media_dir.name,
+                "source_id": source_id,
                 "title": display_title,
                 "start": str(chunk_lines[0].start),
                 "end": str(chunk_lines[-1].end),
             }
 
             if category == "series" and episode_metadata:
-                unique_id = f"{media_dir.name}_S{episode_metadata.season:02d}E{episode_metadata.episode:02d}_C{chunk_index}"
+                unique_id = f"{source_id}_S{episode_metadata.season:02d}E{episode_metadata.episode:02d}_C{chunk_index}"
                 metadata["season"] = episode_metadata.season
                 metadata["episode"] = episode_metadata.episode
             else:
-                unique_id = f"{media_dir.name}_{subtitle_file.stem}_C{chunk_index}"
+                unique_id = f"{source_id}_{subtitle_file.stem}_C{chunk_index}"
 
             yield {
                 "id": unique_id,
@@ -132,7 +147,9 @@ def main():
             if folder.is_dir():
                 media_iterator = process_media_folder(folder, category)
 
-                vector_db.process_and_upload(folder.name, media_iterator, category)
+                vector_db.process_and_upload(
+                    slugify(folder.name), media_iterator, category
+                )
 
 
 if __name__ == "__main__":

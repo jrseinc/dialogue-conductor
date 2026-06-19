@@ -3,10 +3,12 @@ from pathlib import Path
 import logging
 import pysrt
 from pinecone_text.sparse import BM25Encoder
+from pinecone_service import SimpleTokenizer
 from rich.logging import RichHandler
 
 BASE_DIR = Path(__file__).resolve().parent
 BM25_DATASET_DIR = BASE_DIR / "bm25_dataset"
+GLOBAL_MODEL_DIR = BM25_DATASET_DIR / "global"
 
 MEDIA_DIRS = [
     {"path": BASE_DIR / "shows", "category": "series"},
@@ -25,7 +27,7 @@ logger = logging.getLogger("rich")
 def create_show_corpus(media_dir: Path) -> list[str]:
     corpus = []
 
-    srt_files = list(media_dir.glob("*.srt"))
+    srt_files = sorted(media_dir.rglob("*.srt"))
     logger.info(f"Found {len(srt_files)} subtitle files in {media_dir.name}")
 
     for subtitle_file in srt_files:
@@ -45,37 +47,9 @@ def create_show_corpus(media_dir: Path) -> list[str]:
     return corpus
 
 
-def train_and_save_bm25(media_dir: Path):
-    logger.info(
-        f"Building corpus for: [bold cyan]{media_dir.name}[/bold cyan]",
-        extra={"markup": True},
-    )
-    corpus = create_show_corpus(media_dir)
+def build_global_corpus() -> list[str]:
+    corpus: list[str] = []
 
-    if not corpus:
-        logger.warning(f"No subtitles found in {media_dir.name}. Skipping.")
-        return
-
-    destination_dir = BM25_DATASET_DIR / media_dir.name
-    destination_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = destination_dir / "bm25_model.json"
-
-    logger.info(
-        f"Training BM25 on [bold yellow]{len(corpus)}[/bold yellow] chunks...",
-        extra={"markup": True},
-    )
-    encoder = BM25Encoder()
-    encoder.fit(corpus)
-
-    encoder.dump(str(model_path))
-    logger.info(
-        f"Successfully saved trained model to [bold green]{model_path}[/bold green]",
-        extra={"markup": True},
-    )
-
-
-def build_bm25_datasets():
     for media_dir in MEDIA_DIRS:
         root_path = media_dir["path"]
         category = media_dir["category"]
@@ -86,7 +60,48 @@ def build_bm25_datasets():
 
         for item in root_path.iterdir():
             if item.is_dir():
-                train_and_save_bm25(item)
+                logger.info(
+                    f"Adding [bold cyan]{item.name}[/bold cyan] to global corpus",
+                    extra={"markup": True},
+                )
+                corpus.extend(create_show_corpus(item))
+
+    return corpus
+
+
+def train_and_save_global(corpus: list[str]):
+    if not corpus:
+        logger.warning("Global corpus is empty. Nothing to train.")
+        return
+
+    GLOBAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    model_path = GLOBAL_MODEL_DIR / "bm25_model.json"
+
+    logger.info(
+        f"Training global BM25 on [bold yellow]{len(corpus)}[/bold yellow] chunks "
+        "across all shows and movies...",
+        extra={"markup": True},
+    )
+
+    # stem/stopwords are disabled so the query-side tokenizer reduces to
+    # lowercase + punctuation removal + whitespace split, which can be
+    # reproduced exactly in TypeScript on the detective side. This keeps the
+    # hosted query encoder and the indexed documents byte-for-byte consistent
+    # across both Hindi (Devanagari) and English content.
+    encoder = BM25Encoder(stem=False, remove_stopwords=False)
+    encoder._tokenizer = SimpleTokenizer()
+    encoder.fit(corpus)
+
+    encoder.dump(str(model_path))
+    logger.info(
+        f"Successfully saved global model to [bold green]{model_path}[/bold green]",
+        extra={"markup": True},
+    )
+
+
+def build_bm25_datasets():
+    corpus = build_global_corpus()
+    train_and_save_global(corpus)
 
 
 if __name__ == "__main__":
