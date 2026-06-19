@@ -13,6 +13,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Subliminal subtitle cache
+.subliminal.cache.dbm*
+
 # Environment variables
 .env
 .env.*
